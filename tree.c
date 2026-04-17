@@ -5,11 +5,9 @@
 //
 // Binary tree format (per entry, concatenated with no separators):
 //   "<mode-as-ascii-octal> <name>\0<32-byte-binary-hash>"
-//
-// Example single entry (conceptual):
-//   "100644 hello.txt\0" followed by 32 raw bytes of SHA-256
 
 #include "tree.h"
+#include "index.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +19,11 @@
 #define MODE_FILE      0100644
 #define MODE_EXEC      0100755
 #define MODE_DIR       0040000
+
+// ─── Forward Declarations ───────────────────────────────────────────────────
+
+// Declare object_write from object.c to fix linking errors
+extern int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
 
 // ─── PROVIDED ───────────────────────────────────────────────────────────────
 
@@ -68,7 +71,6 @@ int tree_parse(const void *data, size_t len, Tree *tree_out) {
 
         ptr = null_byte + 1; // Skip null byte
 
-
         // 3. Read the 32-byte binary hash
         if (ptr + HASH_SIZE > end) return -1; 
         memcpy(entry->hash.hash, ptr, HASH_SIZE);
@@ -115,86 +117,111 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
     return 0;
 }
 
-// ─── TODO: Implement these ──────────────────────────────────────────────────
+// ─── IMPLEMENTATION ─────────────────────────────────────────────────────────
 
-// Build a tree hierarchy from the current index and write all tree
-// objects to the object store.
-//
-// HINTS - Useful functions and concepts for this phase:
-//   - index_load      : load the staged files into memory
-//   - strchr          : find the first '/' in a path to separate directories from files
-//   - strncmp         : compare prefixes to group files belonging to the same subdirectory
-//   - Recursion       : you will likely want to create a recursive helper function 
-//                       (e.g., `write_tree_level(entries, count, depth)`) to handle nested dirs.
-//   - tree_serialize  : convert your populated Tree struct into a binary buffer
-//   - object_write    : save that binary buffer to the store as OBJ_TREE
-//
-// Returns 0 on success, -1 on error.
-static int write_tree_level(IndexEntry *entries, int count, int depth, ObjectID *id_out) {
+// Helper to sort index entries by path (crucial for grouping subdirectories)
+static int cmp_index_entries(const void *a, const void *b) {
+    return strcmp(((const IndexEntry *)a)->path, ((const IndexEntry *)b)->path);
+}
+
+// Recursive helper to build tree from a slice of index entries at a given path depth.
+// `depth` represents how many characters into the path string we have already processed.
+static int build_tree_recursive(IndexEntry *entries, int count, int depth, ObjectID *id_out) {
     Tree tree;
     tree.count = 0;
-
+    
     int i = 0;
     while (i < count) {
-        // Find the path component at `depth` level
-        char *path = entries[i].path;
+        if (tree.count >= MAX_TREE_ENTRIES) return -1;
 
-        // Walk past `depth` slashes
-        char *p = path;
-        for (int d = 0; d < depth; d++) { p = strchr(p, '/') + 1; }
-
-        char *slash = strchr(p, '/');
-
+        // The remaining relative path we are looking at for this level
+        const char *path = entries[i].path + depth;
+        
+        // Find the first '/' to see if this belongs in a subdirectory
+        const char *slash = strchr(path, '/');
+        
         if (!slash) {
-            // This is a file at this level — add a blob entry
-            TreeEntry *e = &tree.entries[tree.count++];
-            e->mode = entries[i].mode;
-            strncpy(e->name, p, sizeof(e->name) - 1);
-            e->hash = entries[i].hash;
+            // No slash found -> Direct file in the current directory level
+            TreeEntry *entry = &tree.entries[tree.count++];
+            entry->mode = entries[i].mode;
+            entry->hash = entries[i].hash;
+            strncpy(entry->name, path, sizeof(entry->name) - 1);
+            entry->name[sizeof(entry->name) - 1] = '\0';
             i++;
-        }
-	 else {
-            // This is a subdirectory — collect all entries in it
-            int dir_name_len = slash - p;
+        } else {
+            // Slash found -> This is a subdirectory
+            size_t dir_len = slash - path;
             char dir_name[256];
-            strncpy(dir_name, p, dir_name_len);
-            dir_name[dir_name_len] = '\0';
-
-            // Count how many entries share this subdir
+            if (dir_len >= sizeof(dir_name)) return -1;
+            
+            memcpy(dir_name, path, dir_len);
+            dir_name[dir_len] = '\0';
+            
+            // Because the index is sorted by path, all files inside this subdirectory
+            // will be contiguous in the array. We scan forward to group them.
             int j = i;
             while (j < count) {
-                char *pp = entries[j].path;
-                for (int d = 0; d < depth; d++) { pp = strchr(pp, '/') + 1; }
-                if (strncmp(pp, dir_name, dir_name_len) != 0 || pp[dir_name_len] != '/')
+                const char *j_path = entries[j].path + depth;
+                // If it starts with the same directory name followed by a slash, it belongs inside
+                if (strncmp(j_path, dir_name, dir_len) == 0 && j_path[dir_len] == '/') {
+                    j++;
+                } else {
                     break;
-                j++;
+                }
             }
-
-            // Recursively write the subtree
-            ObjectID sub_id;
-            if (write_tree_level(entries + i, j - i, depth + 1, &sub_id) != 0)
+            
+            // Recursively build the subtree for this group of files
+            ObjectID subtree_id;
+            // The new depth jumps past the directory name and the slash (+1)
+            if (build_tree_recursive(&entries[i], j - i, depth + dir_len + 1, &subtree_id) != 0) {
                 return -1;
-
-            TreeEntry *e = &tree.entries[tree.count++];
-            e->mode = 0040000;
-            strncpy(e->name, dir_name, sizeof(e->name) - 1);
-            e->hash = sub_id;
+            }
+            
+            // Add the new directory tree object to our current tree
+            TreeEntry *entry = &tree.entries[tree.count++];
+            entry->mode = MODE_DIR;
+            entry->hash = subtree_id;
+            strncpy(entry->name, dir_name, sizeof(entry->name) - 1);
+            entry->name[sizeof(entry->name) - 1] = '\0';
+            
+            // Advance the main index (i) past the whole group we just processed
             i = j;
         }
     }
-
-    // Serialize and store this tree level
-    void *data; size_t len;
-    if (tree_serialize(&tree, &data, &len) != 0) return -1;
-    int ret = object_write(OBJ_TREE, data, len, id_out);
-    free(data);
-    return ret;
+    
+    // Serialize and write the tree object to disk
+    void *tree_data;
+    size_t tree_len;
+    if (tree_serialize(&tree, &tree_data, &tree_len) != 0) {
+        return -1;
+    }
+    
+    int result = object_write(OBJ_TREE, tree_data, tree_len, id_out);
+    free(tree_data);
+    
+    return result;
 }
 
+// Build a tree hierarchy from the current index and write all tree
+// objects to the object store.
+// Returns 0 on success, -1 on error.
 int tree_from_index(ObjectID *id_out) {
     Index idx;
-    if (index_load(&idx) != 0) return -1;
-    if (idx.count == 0) return -1;
-    return write_tree_level(idx.entries, idx.count, 0, id_out);
+    
+    // Load the index containing all staged files
+    if (index_load(&idx) != 0) {
+        return -1;
+    }
+    
+    if (idx.count == 0) {
+        fprintf(stderr, "error: no files staged\n");
+        return -1;
+    }
+    
+    // Sort index entries lexicographically by path.
+    // This is a strict requirement for Git trees and makes recursive grouping trivial.
+    qsort(idx.entries, idx.count, sizeof(IndexEntry), cmp_index_entries);
+    
+    // Start building the tree from depth 0 (the root path)
+    return build_tree_recursive(idx.entries, idx.count, 0, id_out);
 }
-
