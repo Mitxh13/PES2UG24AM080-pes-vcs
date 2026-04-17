@@ -112,6 +112,7 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
     // Step 4: Check deduplication
     if (object_exists(id_out)) { free(full); return 0; }
 
+
     // Step 5: Build path, create shard dir
     char path[512], tmp_path[512];
     object_path(id_out, path, sizeof(path));
