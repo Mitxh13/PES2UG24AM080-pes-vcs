@@ -152,7 +152,8 @@ static int write_tree_level(IndexEntry *entries, int count, int depth, ObjectID 
             strncpy(e->name, p, sizeof(e->name) - 1);
             e->hash = entries[i].hash;
             i++;
-        } else {
+        }
+	 else {
             // This is a subdirectory — collect all entries in it
             int dir_name_len = slash - p;
             char dir_name[256];
