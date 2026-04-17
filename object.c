@@ -69,7 +69,6 @@ int object_exists(const ObjectID *id) {
 //   "<type> <size>\0<data>"
 //   where <type> is "blob", "tree", or "commit"
 //   and <size> is the decimal string of the data length
-//
 // Steps:
 //   1. Build the full object: header ("blob 16\0") + data
 //   2. Compute SHA-256 hash of the FULL object (header + data)
