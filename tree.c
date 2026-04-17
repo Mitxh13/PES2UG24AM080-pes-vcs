@@ -68,6 +68,7 @@ int tree_parse(const void *data, size_t len, Tree *tree_out) {
 
         ptr = null_byte + 1; // Skip null byte
 
+
         // 3. Read the 32-byte binary hash
         if (ptr + HASH_SIZE > end) return -1; 
         memcpy(entry->hash.hash, ptr, HASH_SIZE);
