@@ -201,6 +201,7 @@ int commit_create(const char *message, ObjectID *id_out) {
 
     // 2. Read current HEAD (parent commit, may be empty for first commit)
     char parent_hex[HASH_HEX_SIZE + 1];
+
     int has_parent = (head_read(parent_hex) == 0);
 
     // 3. Build commit struct
