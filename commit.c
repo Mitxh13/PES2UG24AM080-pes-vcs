@@ -141,7 +141,6 @@ int head_read(ObjectID *id_out) {
         if (!f) return -1; // Branch exists but has no commits yet
         if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
         fclose(f);
-
         line[strcspn(line, "\r\n")] = '\0';
     }
     return hex_to_hash(line, id_out);
@@ -182,6 +181,9 @@ int head_update(const ObjectID *new_commit) {
 
 // ─── TODO: Implement these ───────────────────────────────────────────────────
 
+// Forward declaration
+extern int tree_from_index(ObjectID *id_out);
+
 // Create a new commit from the current staging area.
 //
 // HINTS - Useful functions to call:
@@ -194,35 +196,51 @@ int head_update(const ObjectID *new_commit) {
 //   - head_update       : moves the branch pointer to your new commit
 //
 // Returns 0 on success, -1 on error.
-int commit_create(const char *message, ObjectID *id_out) {
-    // 1. Build tree from index
-    ObjectID tree_id;
-    if (tree_from_index(&tree_id) != 0) return -1;
-
-    // 2. Read current HEAD (parent commit, may be empty for first commit)
-    char parent_hex[HASH_HEX_SIZE + 1];
-
-    int has_parent = (head_read(parent_hex) == 0);
-
-    // 3. Build commit struct
-    Commit c;
-    memset(&c, 0, sizeof(c));
-    c.tree = tree_id;
-    if (has_parent) hex_to_hash(parent_hex, &c.parent);
-    c.has_parent = has_parent;
-    c.timestamp = time(NULL);
-    strncpy(c.author, pes_author(), sizeof(c.author) - 1);
-    strncpy(c.message, message, sizeof(c.message) - 1);
-
-    // 4. Serialize and write commit object
-    void *data; size_t len;
-    commit_serialize(&c, &data, &len);
-    int ret = object_write(OBJ_COMMIT, data, len, id_out);
-    free(data);
-    if (ret != 0) return -1;
-
-    // 5. Update HEAD to point to new commit
-    char hex[HASH_HEX_SIZE + 1];
-    hash_to_hex(id_out, hex);
-    return head_update(hex);
+int commit_create(const char *message, ObjectID *commit_id_out) {
+    Commit commit;
+    
+    // Step 1: Build tree from index
+    if (tree_from_index(&commit.tree) != 0) {
+        return -1;
+    }
+    
+    // Step 2: Get parent commit (if exists)
+    ObjectID parent_id;
+    if (head_read(&parent_id) == 0) {
+        commit.has_parent = 1;
+        commit.parent = parent_id;
+    } else {
+        commit.has_parent = 0;
+    }
+    
+    // Step 3: Set author and timestamp
+    const char *author = pes_author();
+    strncpy(commit.author, author, sizeof(commit.author) - 1);
+    commit.author[sizeof(commit.author) - 1] = '\0';
+    commit.timestamp = (uint64_t)time(NULL);
+    
+    // Step 4: Set message
+    strncpy(commit.message, message, sizeof(commit.message) - 1);
+    commit.message[sizeof(commit.message) - 1] = '\0';
+    
+    // Step 5: Serialize commit
+    void *commit_data;
+    size_t commit_len;
+    if (commit_serialize(&commit, &commit_data, &commit_len) != 0) {
+        return -1;
+    }
+    
+    // Step 6: Write commit object
+    if (object_write(OBJ_COMMIT, commit_data, commit_len, commit_id_out) != 0) {
+        free(commit_data);
+        return -1;
+    }
+    free(commit_data);
+    
+    // Step 7: Update HEAD
+    if (head_update(commit_id_out) != 0) {
+        return -1;
+    }
+    
+    return 0;
 }
