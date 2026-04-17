@@ -141,6 +141,7 @@ int head_read(ObjectID *id_out) {
         if (!f) return -1; // Branch exists but has no commits yet
         if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
         fclose(f);
+
         line[strcspn(line, "\r\n")] = '\0';
     }
     return hex_to_hash(line, id_out);
